@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>영업활동비 검증</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: Arial; background: #f5f5f5; }
+        .container { max-width: 1000px; margin: 0 auto; padding: 30px; }
+        .header { background: #366092; color: white; padding: 30px; text-align: center; margin-bottom: 30px; }
+        .section { background: white; padding: 30px; margin-bottom: 20px; border-radius: 8px; }
+        .upload-area { border: 2px dashed #999; padding: 40px; text-align: center; cursor: pointer; margin: 20px 0; }
+        .upload-area:hover { background: #f0f0f0; }
+        .btn { background: #366092; color: white; padding: 12px 30px; border: none; border-radius: 6px; cursor: pointer; }
+        .btn:disabled { background: #ccc; }
+        table { width: 100%; border-collapse: collapse; }
+        th { background: #366092; color: white; padding: 10px; }
+        td { padding: 8px; border-bottom: 1px solid #ddd; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 영업활동비 검증</h1>
+        </div>
+
+        <div class="section">
+            <h2>파일 업로드</h2>
+            <div class="upload-area" onclick="document.getElementById('file1').click()">근무현황 Excel</div>
+            <div class="file-name" id="name1"></div>
+            <div class="upload-area" onclick="document.getElementById('file2').click()">신청내역 Excel</div>
+            <div class="file-name" id="name2"></div>
+            <input type="file" id="file1" accept=".xlsx" style="display:none" onchange="setFile(1)">
+            <input type="file" id="file2" accept=".xlsx" style="display:none" onchange="setFile(2)">
+            <button class="btn" id="btn" onclick="run()" disabled>분석 시작</button>
+            <div id="msg"></div>
+        </div>
+
+        <div id="result" class="section hidden">
+            <h2>분석 결과</h2>
+            <table>
+                <thead>
+                    <tr><th>사번</th><th>성명</th><th>조직</th><th>비영업일</th><th>근태내용</th><th>영업일</th><th>기준액</th><th>신청액</th><th>초과액</th><th>판정</th></tr>
+                </thead>
+                <tbody id="tbody"></tbody>
+            </table>
+            <button class="btn" onclick="download()" style="margin-top: 20px;">Excel 다운로드</button>
+        </div>
+    </div>
+
+    <script>
+        let files = [null, null];
+        let result = [];
+
+        function setFile(n) {
+            files[n-1] = document.getElementById('file' + n).files[0];
+            document.getElementById('name' + n).textContent = files[n-1].name;
+            document.getElementById('btn').disabled = !files[0] || !files[1];
+        }
+
+        async function run() {
+            const att = await readExcel(files[0]);
+            const exp = await readExcel(files[1]);
+            result = analyze(att, exp);
+            show();
+        }
+
+        async function readExcel(file) {
+            return new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const wb = XLSX.read(e.target.result, {type:'binary'});
+                    resolve(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+                };
+                reader.readAsBinaryString(file);
+            });
+        }
+
+        function analyze(att, exp) {
+            const empMap = {};
+            for (const r of att) {
+                const sb = r['사번'] || r['사원번호'];
+                if (!sb) continue;
+                if (!empMap[sb]) empMap[sb] = {사번:sb, 성명:r['성명'], 조직:r['공식조직']||r['조직'], 근태별:{}, 비영업일:0};
+                const duty = r['근태'];
+                if (duty) {
+                    empMap[sb].근태별[duty] = (empMap[sb].근태별[duty]||0) + 1;
+                    if (['연차','병결','재택','해외출장','육아휴직'].some(x => duty.includes(x))) empMap[sb].비영업일++;
+                }
+            }
+
+            const sa = {};
+            for (const r of exp) {
+                const sb = r['사번'];
+                if (sb) sa[sb] = parseFloat(r['7월 정산액']||0) || 0;
+            }
+
+            const res = [];
+            for (const [sb, e] of Object.entries(empMap)) {
+                const bd = Math.max(0, 22 - e.비영업일);
+                const ba = bd >= 15 ? 546125 : bd >= 10 ? 391172 : bd >= 5 ? 235253 : 0;
+                const x = sa[sb] || 0;
+                const oa = Math.max(0, x - ba);
+                const dutyStr = Object.entries(e.근태별).map(([k,v]) => `${k}:${v}일`).join(', ');
+                res.push({사번:sb, 성명:e.성명, 조직:e.조직, 비영업일:e.비영업일, 근태내용:dutyStr, 영업일:bd, 기준액:ba, 신청액:Math.floor(x), 초과액:Math.floor(oa), 판정:x<=ba?'적정':'초과신청'});
+            }
+            return res.sort((a,b) => String(a.사번).localeCompare(String(b.사번)));
+        }
+
+        function show() {
+            let html = '';
+            result.forEach(r => {
+                html += `<tr><td>${r.사번}</td><td>${r.성명}</td><td>${r.조직}</td><td>${r.비영업일}</td><td>${r.근태내용}</td><td>${r.영업일}일</td><td>${r.기준액.toLocaleString()}</td><td>${r.신청액.toLocaleString()}</td><td>${r.초과액.toLocaleString()}</td><td>${r.판정}</td></tr>`;
+            });
+            document.getElementById('tbody').innerHTML = html;
+            document.getElementById('result').classList.remove('hidden');
+        }
+
+        function download() {
+            const wb = XLSX.utils.book_new();
+            const data = [['사번','성명','조직','비영업일','근태내용','영업일','기준액','신청액','초과액','판정']];
+            result.forEach(r => data.push([r.사번, r.성명, r.조직, r.비영업일, r.근태내용, r.영업일, r.기준액, r.신청액, r.초과액, r.판정]));
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), '결과');
+            XLSX.writeFile(wb, '영업활동비검증결과.xlsx');
+        }
+    </script>
+</body>
+</html>
